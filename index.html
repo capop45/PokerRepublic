@@ -968,6 +968,8 @@ let currentSection = 'dashboard';
 let gameFilter = 'all';
 let rankingTab = 'general';
 let syncTimeout = null;
+let currentDetailPlayerId = null;
+let currentDetailGame = null;
 
 /* ═══════════════════════════════════════════════════════════════
    THEME
@@ -1796,6 +1798,8 @@ function renderCurrentSection() {
         case 'games': renderGames(); break;
         case 'ranking': renderRanking(); break;
         case 'finance': renderFinance(); break;
+        case 'playerDetail': if (currentDetailPlayerId) renderPlayerDetail(currentDetailPlayerId); break;
+        case 'gameDetail': if (currentDetailGame) renderGameDetail(currentDetailGame.id, currentDetailGame.type); break;
     }
 }
 
@@ -1913,6 +1917,7 @@ function setGameFilter(filter, btn) {
    ═══════════════════════════════════════════════════════════════ */
 function openGameDetail(gameId, gameType) {
     currentSection = 'gameDetail';
+    currentDetailGame = { id: gameId, type: gameType };
     document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
     document.getElementById('sec-gameDetail').classList.add('active');
     document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
@@ -2004,6 +2009,7 @@ function renderGameDetail(gameId, gameType) {
    ═══════════════════════════════════════════════════════════════ */
 function openPlayerDetail(playerId) {
     currentSection = 'playerDetail';
+    currentDetailPlayerId = playerId;
     document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
     document.getElementById('sec-playerDetail').classList.add('active');
     document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
