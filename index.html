@@ -930,6 +930,7 @@ body {
                 <h1 class="section-title">Finanças</h1>
                 <div style="display:flex;gap:var(--sp-sm);">
                     <button class="btn btn-secondary" onclick="openModal('resetHistory')">🗑️ Resetar Histórico</button>
+                    <button class="btn btn-secondary" onclick="openModal('batchTransaction')">👥 Transação em Lote</button>
                     <button class="btn btn-primary" onclick="openModal('newTransaction')">+ Transação</button>
                 </div>
             </div>
@@ -1070,6 +1071,7 @@ function uid() { return Date.now().toString(36) + Math.random().toString(36).sli
 
 function formatChips(totalChips) { return '$' + totalChips.toLocaleString('pt-BR'); }
 function chipsToReal(totalChips) { return totalChips * CONFIG.CHIP_VALUES[100] / 100; }
+function realToChips(reais) { return Math.round(reais * 100 / CONFIG.CHIP_VALUES[100]); }
 function formatReal(val) { return 'R$ ' + val.toFixed(2).replace('.', ','); }
 function formatBRL(chips) { return formatReal(chipsToReal(chips)); }
 function formatDate(iso) {
@@ -1171,6 +1173,16 @@ function calculatePlayerStats(playerId) {
     return { gamesPlayed, wins, totalProfit };
 }
 
+// Chips still in play: buy-ins (incl. rebuys) of players who haven't left the table yet.
+function calcChipsOnTable(game, gameType) {
+    return (game.players || []).reduce((s, p) => {
+        const stillIn = gameType === 'home'
+            ? (p.cashOut === null || p.cashOut === undefined)
+            : !p.eliminated;
+        return stillIn ? s + (p.buyInTotal || 0) : s;
+    }, 0);
+}
+
 /* ═══════════════════════════════════════════════════════════════
    TOAST
    ═══════════════════════════════════════════════════════════════ */
@@ -1196,6 +1208,7 @@ function openModal(type, data) {
     setTimeout(() => { const inp = content.querySelector('input,select'); if (inp) inp.focus(); }, 100);
     // Compute totals for modals that show a live sum (e.g. prefilled edit)
     if (type === 'cashOut') updateCashOutTotal();
+    if (type === 'batchTransaction') updateBatchPreview();
 }
 
 function closeModal() {
@@ -1203,8 +1216,16 @@ function closeModal() {
     document.body.style.overflow = '';
 }
 
+// A click's target is the common ancestor of mousedown and mouseup, so a drag that
+// starts inside the modal (selecting an input's value) and ends outside it reports the
+// overlay as the target. Only treat it as a backdrop click if the press itself started there.
+let modalPressOnBackdrop = false;
+document.getElementById('modalOverlay').addEventListener('mousedown', e => {
+    modalPressOnBackdrop = e.target === e.currentTarget;
+});
 document.getElementById('modalOverlay').addEventListener('click', e => {
-    if (e.target === e.currentTarget) closeModal();
+    if (e.target === e.currentTarget && modalPressOnBackdrop) closeModal();
+    modalPressOnBackdrop = false;
 });
 
 /* ═══════════════════════════════════════════════════════════════
@@ -1225,6 +1246,8 @@ function getModalContent(type, data) {
         case 'editPlayer': return modalEditPlayer(data);
         case 'resetHistory': return modalResetHistory();
         case 'deleteGame': return modalDeleteGame(data);
+        case 'zeroBalance': return modalZeroBalance(data);
+        case 'batchTransaction': return modalBatchTransaction();
         default: return '<p>Modal desconhecido</p>';
     }
 }
@@ -1523,9 +1546,9 @@ function modalResetHistory() {
             <button class="modal-close" onclick="closeModal()">✕</button>
         </div>
         <p style="color:var(--text-secondary);margin-bottom:var(--sp-md);">
-            Isso vai apagar <strong>todo o histórico de jogos, transações e o ranking</strong>.
+            Isso vai apagar <strong>as transações registradas</strong> (depósitos/saques).
             O saldo atual de cada jogador é preservado (fica registrado como saldo inicial).
-            Jogadores cadastrados não são removidos.
+            Jogos, torneios, ranking e jogadores cadastrados <strong>não são afetados</strong>.
         </p>
         <p style="color:var(--accent-danger);font-weight:600;margin-bottom:var(--sp-md);">Esta ação não pode ser desfeita.</p>
         <div class="form-group">
@@ -1558,6 +1581,87 @@ function modalDeleteGame(data) {
     `;
 }
 
+function modalZeroBalance(data) {
+    const balance = calculatePlayerBalance(data.playerId);
+    const name = getPlayerName(data.playerId);
+    if (balance === 0) {
+        return `
+            <div class="modal-header">
+                <h2 class="modal-title">Zerar Saldo</h2>
+                <button class="modal-close" onclick="closeModal()">✕</button>
+            </div>
+            <p style="color:var(--text-secondary);">O saldo de <strong>${name}</strong> já está zerado.</p>
+            <button class="btn btn-secondary btn-block" style="margin-top:var(--sp-md);" onclick="closeModal()">Fechar</button>
+        `;
+    }
+    const isPositive = balance > 0;
+    return `
+        <div class="modal-header">
+            <h2 class="modal-title">Zerar Saldo — ${name}</h2>
+            <button class="modal-close" onclick="closeModal()">✕</button>
+        </div>
+        <div style="padding:var(--sp-md);background:var(--bg-tertiary);border-radius:var(--radius-md);text-align:center;margin-bottom:var(--sp-md);">
+            <div style="font-size:var(--fs-xs);color:var(--text-muted);text-transform:uppercase;">Saldo Atual</div>
+            <div class="${balanceClass(balance)}" style="font-size:var(--fs-2xl);font-weight:800;font-family:var(--font-mono);">${formatChips(balance)}</div>
+            <div class="${balanceClass(balance)}" style="font-size:var(--fs-md);">${formatBRL(balance)}</div>
+        </div>
+        <p style="color:var(--text-secondary);margin-bottom:var(--sp-md);font-size:var(--fs-sm);">
+            Será registrado um <strong>${isPositive ? 'saque' : 'depósito'}</strong> de
+            <strong>${formatChips(Math.abs(balance))} (${formatBRL(Math.abs(balance))})</strong>
+            para levar o saldo a zero. O histórico de jogos não é alterado.
+        </p>
+        <div class="form-group">
+            <label class="form-label">Observação (opcional)</label>
+            <input class="form-input" id="inp-zeroNote" placeholder="Ex: acerto de contas">
+        </div>
+        <div class="confirm-actions">
+            <button class="btn btn-secondary" onclick="closeModal()">Cancelar</button>
+            <button class="btn btn-danger" onclick="zeroPlayerBalance('${data.playerId}')">Zerar Saldo</button>
+        </div>
+    `;
+}
+
+function modalBatchTransaction() {
+    const rows = DB.players.map(p =>
+        `<label style="display:flex;align-items:center;gap:var(--sp-sm);padding:var(--sp-xs) 0;cursor:pointer;font-size:var(--fs-md);">
+            <input type="checkbox" value="${p.id}" checked style="width:22px;height:22px;accent-color:var(--accent-primary);">
+            ${p.name}${p.nickname ? ` (${p.nickname})` : ''}
+        </label>`
+    ).join('');
+    return `
+        <div class="modal-header">
+            <h2 class="modal-title">Transação em Lote</h2>
+            <button class="modal-close" onclick="closeModal()">✕</button>
+        </div>
+        <div class="form-group">
+            <label class="form-label">Tipo</label>
+            <select class="form-select" id="inp-batchType">
+                <option value="deposit">Depósito (entrada de fichas)</option>
+                <option value="withdraw">Saque (retirada de fichas)</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label class="form-label">Valor em reais (R$) por jogador</label>
+            <input class="form-input" id="inp-batchReais" type="number" min="0" step="0.01" value="15" oninput="updateBatchPreview()">
+            <small style="color:var(--text-muted);font-size:var(--fs-xs);" id="batchChipsPreview">= $15.000 em fichas</small>
+        </div>
+        <div class="form-group">
+            <label class="form-label">Observação (opcional)</label>
+            <input class="form-input" id="inp-batchNote" placeholder="Ex: recarga da noite">
+        </div>
+        <div class="form-group">
+            <label class="form-label">
+                Jogadores
+                <button class="btn btn-sm btn-secondary" style="margin-left:var(--sp-sm);" onclick="toggleAllBatchPlayers()">Marcar/Desmarcar todos</button>
+            </label>
+            <div id="batchPlayersCheckboxes" style="max-height:220px;overflow-y:auto;padding:var(--sp-sm);background:var(--bg-input);border-radius:var(--radius-md);border:1px solid var(--border-default);">
+                ${rows || '<p style="color:var(--text-muted)">Nenhum jogador cadastrado</p>'}
+            </div>
+        </div>
+        <button class="btn btn-primary btn-block" onclick="addBatchTransaction()">Aplicar a Todos os Selecionados</button>
+    `;
+}
+
 /* ═══════════════════════════════════════════════════════════════
    CHIP HELPERS
    ═══════════════════════════════════════════════════════════════ */
@@ -1579,6 +1683,12 @@ function updateCashOutTotal() {
     const elR = document.getElementById('cashOutTotalReal');
     if (el) el.textContent = formatChips(total);
     if (elR) elR.textContent = formatBRL(total);
+}
+
+function updateBatchPreview() {
+    const reais = parseFloat(document.getElementById('inp-batchReais')?.value) || 0;
+    const el = document.getElementById('batchChipsPreview');
+    if (el) el.textContent = '= ' + formatChips(realToChips(reais)) + ' em fichas';
 }
 
 function updateTxPreview() {
@@ -1645,26 +1755,32 @@ function resetHistory() {
         return;
     }
     const now = new Date().toISOString();
-    DB.players.forEach(p => {
-        const balance = calculatePlayerBalance(p.id);
-        if (balance !== 0) {
+    // Only the transactions portion of each player's balance is migrated —
+    // games/tournaments are untouched, so their contribution to the balance stays as-is.
+    const migrated = DB.players.map(p => {
+        let txBalance = 0;
+        DB.transactions.filter(t => t.playerId === p.id).forEach(t => {
+            if (t.type === 'deposit') txBalance += t.amountChips;
+            else if (t.type === 'withdraw') txBalance -= t.amountChips;
+        });
+        return { playerId: p.id, txBalance };
+    });
+    DB.transactions = [];
+    migrated.forEach(({ playerId, txBalance }) => {
+        if (txBalance !== 0) {
             DB.transactions.push({
                 id: uid(),
-                playerId: p.id,
-                type: balance > 0 ? 'deposit' : 'withdraw',
-                amountChips: Math.abs(balance),
+                playerId,
+                type: txBalance > 0 ? 'deposit' : 'withdraw',
+                amountChips: Math.abs(txBalance),
                 note: 'Saldo migrado (reset de histórico)',
                 createdAt: now
             });
         }
     });
-    // Remove old transactions (keep only the freshly created migration ones)
-    DB.transactions = DB.transactions.filter(t => t.createdAt === now);
-    DB.homeGames = [];
-    DB.tournaments = [];
     debouncedSave();
     closeModal();
-    toast('Histórico resetado! Saldos preservados. ✅');
+    toast('Histórico de transações resetado! Jogos e saldos preservados. ✅');
     navigate('finance');
 }
 
@@ -1896,6 +2012,57 @@ function addTransaction() {
     renderCurrentSection();
 }
 
+function zeroPlayerBalance(playerId) {
+    const balance = calculatePlayerBalance(playerId);
+    if (balance === 0) { closeModal(); return; }
+    const note = document.getElementById('inp-zeroNote').value.trim();
+    DB.transactions.push({
+        id: uid(),
+        playerId,
+        // A positive balance is owed to the player, so paying it out is a withdrawal.
+        type: balance > 0 ? 'withdraw' : 'deposit',
+        amountChips: Math.abs(balance),
+        note: note || 'Saldo zerado',
+        createdAt: new Date().toISOString()
+    });
+    debouncedSave();
+    closeModal();
+    toast(`Saldo de ${getPlayerName(playerId)} zerado`);
+    renderCurrentSection();
+}
+
+function toggleAllBatchPlayers() {
+    const boxes = document.querySelectorAll('#batchPlayersCheckboxes input[type=checkbox]');
+    const anyUnchecked = Array.from(boxes).some(b => !b.checked);
+    boxes.forEach(b => { b.checked = anyUnchecked; });
+}
+
+function addBatchTransaction() {
+    const type = document.getElementById('inp-batchType').value;
+    const reais = parseFloat(document.getElementById('inp-batchReais').value) || 0;
+    const note = document.getElementById('inp-batchNote').value.trim();
+    const checks = document.querySelectorAll('#batchPlayersCheckboxes input:checked');
+    const selectedIds = Array.from(checks).map(c => c.value);
+    if (reais <= 0) { toast('Valor inválido', 'error'); return; }
+    if (selectedIds.length === 0) { toast('Selecione ao menos um jogador', 'error'); return; }
+    const chips = realToChips(reais);
+    const now = new Date().toISOString();
+    selectedIds.forEach(playerId => {
+        DB.transactions.push({
+            id: uid(),
+            playerId,
+            type,
+            amountChips: chips,
+            note: note || 'Transação em lote',
+            createdAt: now
+        });
+    });
+    debouncedSave();
+    closeModal();
+    toast(`${type === 'deposit' ? 'Depósito' : 'Saque'} de ${formatReal(reais)} aplicado a ${selectedIds.length} jogador(es)`);
+    renderCurrentSection();
+}
+
 /* ═══════════════════════════════════════════════════════════════
    RENDER
    ═══════════════════════════════════════════════════════════════ */
@@ -1991,6 +2158,7 @@ function renderGames() {
 function renderGameCard(g) {
     const playerCount = (g.players || []).length;
     const totalPot = (g.players || []).reduce((s, p) => s + (p.buyInTotal || 0), 0);
+    const onTable = calcChipsOnTable(g, g.gameType);
     const typeLabel = g.gameType === 'home' ? 'Home Game' : 'Torneio';
     const typeClass = g.gameType === 'home' ? 'home' : 'tournament';
     const statusLabel = g.status === 'active' ? 'Em Andamento' : 'Finalizado';
@@ -2009,6 +2177,7 @@ function renderGameCard(g) {
                     <span>💰 ${formatBRL(totalPot)}</span>
                     <span>📅 ${formatDateShort(g.createdAt)}</span>
                 </div>
+                ${g.status === 'active' ? `<div style="margin-top:var(--sp-xs);font-size:var(--fs-sm);color:var(--accent-primary);font-weight:600;">🪙 Na mesa: ${formatChips(onTable)} (${formatBRL(onTable)})</div>` : ''}
             </div>
             ${isFinished ? `<button class="btn btn-sm btn-danger" style="margin-top:var(--sp-md);" onclick="event.stopPropagation();openModal('deleteGame',{gameId:'${g.id}',gameType:'${g.gameType}'})">🗑️ Excluir Jogo</button>` : ''}
         </div>
@@ -2041,6 +2210,7 @@ function renderGameDetail(gameId, gameType) {
     if (!game) { navigate('games'); return; }
     document.getElementById('gameDetailTitle').textContent = game.name;
     const totalPot = game.players.reduce((s, p) => s + (p.buyInTotal || 0), 0);
+    const onTable = calcChipsOnTable(game, gameType);
     const isActive = game.status === 'active';
     let html = `
         <div class="stats-row">
@@ -2048,6 +2218,7 @@ function renderGameDetail(gameId, gameType) {
             <div class="stat-card"><div class="stat-value">${formatBRL(totalPot)}</div><div class="stat-label">Pote Total</div></div>
             <div class="stat-card"><div class="stat-value">${formatChips(totalPot)}</div><div class="stat-label">Fichas Total</div></div>
             <div class="stat-card"><div class="stat-value">${formatChips(game.buyIn)}</div><div class="stat-label">Buy-in</div></div>
+            ${isActive ? `<div class="stat-card"><div class="stat-value">${formatChips(onTable)}</div><div class="stat-label">Na Mesa (${formatBRL(onTable)})</div></div>` : ''}
         </div>
     `;
     if (isActive) {
@@ -2153,6 +2324,7 @@ function renderPlayerDetail(playerId) {
             <div style="margin-left:auto;display:flex;gap:var(--sp-sm);">
                 <button class="btn btn-sm btn-secondary" onclick="openModal('editPlayer',{playerId:'${playerId}'})">✏️ Editar</button>
                 <button class="btn btn-sm btn-secondary" onclick="openModal('newTransaction',{playerId:'${playerId}'})">💰 Transação</button>
+                <button class="btn btn-sm btn-secondary" onclick="openModal('zeroBalance',{playerId:'${playerId}'})">⚖️ Zerar Saldo</button>
                 <button class="btn btn-sm btn-danger" onclick="deletePlayer('${playerId}')">🗑️</button>
             </div>
         </div>
