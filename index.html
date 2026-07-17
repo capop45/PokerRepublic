@@ -928,7 +928,10 @@ body {
         <section class="section" id="sec-finance">
             <div class="section-header">
                 <h1 class="section-title">Finanças</h1>
-                <button class="btn btn-primary" onclick="openModal('newTransaction')">+ Transação</button>
+                <div style="display:flex;gap:var(--sp-sm);">
+                    <button class="btn btn-secondary" onclick="openModal('resetHistory')">🗑️ Resetar Histórico</button>
+                    <button class="btn btn-primary" onclick="openModal('newTransaction')">+ Transação</button>
+                </div>
             </div>
             <div class="stats-row" id="financeStats"></div>
             <div class="card" style="overflow:auto;">
@@ -1220,6 +1223,8 @@ function getModalContent(type, data) {
         case 'tournamentResult': return modalTournamentResult(data);
         case 'confirm': return modalConfirm(data);
         case 'editPlayer': return modalEditPlayer(data);
+        case 'resetHistory': return modalResetHistory();
+        case 'deleteGame': return modalDeleteGame(data);
         default: return '<p>Modal desconhecido</p>';
     }
 }
@@ -1511,6 +1516,48 @@ function modalConfirm(data) {
     `;
 }
 
+function modalResetHistory() {
+    return `
+        <div class="modal-header">
+            <h2 class="modal-title">⚠️ Resetar Histórico</h2>
+            <button class="modal-close" onclick="closeModal()">✕</button>
+        </div>
+        <p style="color:var(--text-secondary);margin-bottom:var(--sp-md);">
+            Isso vai apagar <strong>todo o histórico de jogos, transações e o ranking</strong>.
+            O saldo atual de cada jogador é preservado (fica registrado como saldo inicial).
+            Jogadores cadastrados não são removidos.
+        </p>
+        <p style="color:var(--accent-danger);font-weight:600;margin-bottom:var(--sp-md);">Esta ação não pode ser desfeita.</p>
+        <div class="form-group">
+            <label class="form-label">Digite a senha para confirmar</label>
+            <input class="form-input" id="inp-resetPassword" type="password" placeholder="Senha" autocomplete="off">
+        </div>
+        <div class="confirm-actions">
+            <button class="btn btn-secondary" onclick="closeModal()">Cancelar</button>
+            <button class="btn btn-danger" onclick="resetHistory()">Resetar Tudo</button>
+        </div>
+    `;
+}
+
+function modalDeleteGame(data) {
+    const list = data.gameType === 'home' ? DB.homeGames : DB.tournaments;
+    const game = list.find(g => g.id === data.gameId);
+    return `
+        <div class="modal-header">
+            <h2 class="modal-title">Excluir Jogo?</h2>
+            <button class="modal-close" onclick="closeModal()">✕</button>
+        </div>
+        <p style="color:var(--text-secondary);margin-bottom:var(--sp-md);">
+            Tem certeza que deseja excluir <strong>${game ? game.name : 'este jogo'}</strong>?
+            Isso removerá o jogo do histórico e do ranking, e afetará o saldo dos jogadores envolvidos. Esta ação não pode ser desfeita.
+        </p>
+        <div class="confirm-actions">
+            <button class="btn btn-secondary" onclick="closeModal()">Cancelar</button>
+            <button class="btn btn-danger" onclick="deleteGame('${data.gameId}','${data.gameType}')">Excluir</button>
+        </div>
+    `;
+}
+
 /* ═══════════════════════════════════════════════════════════════
    CHIP HELPERS
    ═══════════════════════════════════════════════════════════════ */
@@ -1589,6 +1636,48 @@ function confirmDeletePlayer(id) {
     closeModal();
     toast('Jogador removido');
     navigate('players');
+}
+
+function resetHistory() {
+    const pass = document.getElementById('inp-resetPassword').value;
+    if (pass !== 'capop45') {
+        toast('Senha incorreta', 'error');
+        return;
+    }
+    const now = new Date().toISOString();
+    DB.players.forEach(p => {
+        const balance = calculatePlayerBalance(p.id);
+        if (balance !== 0) {
+            DB.transactions.push({
+                id: uid(),
+                playerId: p.id,
+                type: balance > 0 ? 'deposit' : 'withdraw',
+                amountChips: Math.abs(balance),
+                note: 'Saldo migrado (reset de histórico)',
+                createdAt: now
+            });
+        }
+    });
+    // Remove old transactions (keep only the freshly created migration ones)
+    DB.transactions = DB.transactions.filter(t => t.createdAt === now);
+    DB.homeGames = [];
+    DB.tournaments = [];
+    debouncedSave();
+    closeModal();
+    toast('Histórico resetado! Saldos preservados. ✅');
+    navigate('finance');
+}
+
+function deleteGame(gameId, gameType) {
+    if (gameType === 'home') {
+        DB.homeGames = DB.homeGames.filter(g => g.id !== gameId);
+    } else {
+        DB.tournaments = DB.tournaments.filter(g => g.id !== gameId);
+    }
+    debouncedSave();
+    closeModal();
+    toast('Jogo excluído');
+    navigate('games');
 }
 
 function createHomeGame() {
@@ -1906,8 +1995,9 @@ function renderGameCard(g) {
     const typeClass = g.gameType === 'home' ? 'home' : 'tournament';
     const statusLabel = g.status === 'active' ? 'Em Andamento' : 'Finalizado';
     const statusClass = g.status === 'active' ? 'active' : 'finished';
+    const isFinished = g.status === 'finished';
     return `
-        <div class="game-card" onclick="openGameDetail('${g.id}','${g.gameType}')" style="cursor:pointer;">
+        <div class="game-card" onclick="openGameDetail('${g.id}','${g.gameType}')" style="cursor:pointer;position:relative;">
             <div class="game-card-header">
                 <span class="game-type-badge ${typeClass}">${g.gameType === 'home' ? '🃏' : '🏆'} ${typeLabel}</span>
                 <span class="game-type-badge ${statusClass}">${statusLabel}</span>
@@ -1920,6 +2010,7 @@ function renderGameCard(g) {
                     <span>📅 ${formatDateShort(g.createdAt)}</span>
                 </div>
             </div>
+            ${isFinished ? `<button class="btn btn-sm btn-danger" style="margin-top:var(--sp-md);" onclick="event.stopPropagation();openModal('deleteGame',{gameId:'${g.id}',gameType:'${g.gameType}'})">🗑️ Excluir Jogo</button>` : ''}
         </div>
     `;
 }
@@ -1964,6 +2055,10 @@ function renderGameDetail(gameId, gameType) {
             <button class="btn btn-secondary" onclick="openModal('addPlayerToGame',{gameId:'${gameId}',gameType:'${gameType}'})">+ Jogador</button>
             <button class="btn btn-danger" onclick="openModal('finishGame',{gameId:'${gameId}',gameType:'${gameType}'})">Finalizar Jogo</button>
             ${gameType === 'tournament' ? `<button class="btn btn-primary" onclick="openModal('tournamentResult',{gameId:'${gameId}'})">Eliminar Jogador</button>` : ''}
+        </div>`;
+    } else {
+        html += `<div style="display:flex;gap:var(--sp-sm);margin-bottom:var(--sp-lg);flex-wrap:wrap;">
+            <button class="btn btn-danger" onclick="openModal('deleteGame',{gameId:'${gameId}',gameType:'${gameType}'})">🗑️ Excluir Jogo</button>
         </div>`;
     }
     // Players list
