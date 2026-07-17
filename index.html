@@ -1191,6 +1191,8 @@ function openModal(type, data) {
     document.body.style.overflow = 'hidden';
     // Focus first input
     setTimeout(() => { const inp = content.querySelector('input,select'); if (inp) inp.focus(); }, 100);
+    // Compute totals for modals that show a live sum (e.g. prefilled edit)
+    if (type === 'cashOut') updateCashOutTotal();
 }
 
 function closeModal() {
@@ -1425,9 +1427,11 @@ function modalRebuy(data) {
 function modalCashOut(data) {
     const game = DB.homeGames.find(g => g.id === data.gameId);
     const pp = game.players.find(p => p.id === data.playerId);
+    const isEdit = data.edit && pp.cashOut !== null && pp.cashOut !== undefined;
+    const prefill = isEdit ? calcChipBreakdown(pp.cashOut) : {};
     return `
         <div class="modal-header">
-            <h2 class="modal-title">Saída — ${getPlayerName(data.playerId)}</h2>
+            <h2 class="modal-title">${isEdit ? 'Editar Saída' : 'Saída'} — ${getPlayerName(data.playerId)}</h2>
             <button class="modal-close" onclick="closeModal()">✕</button>
         </div>
         <p style="color:var(--text-secondary);margin-bottom:var(--sp-md);font-size:var(--fs-md);">
@@ -1444,7 +1448,7 @@ function modalCashOut(data) {
                         <button onclick="stepChip('co-${d}',-1)">−</button>
                         <button onclick="stepChip('co-${d}',1)">+</button>
                     </div>
-                    <input id="co-${d}" type="number" value="0" min="0" oninput="updateCashOutTotal()">
+                    <input id="co-${d}" type="number" value="${prefill[d] || 0}" min="0" oninput="updateCashOutTotal()">
                 </div>
             `).join('')}
         </div>
@@ -1453,7 +1457,7 @@ function modalCashOut(data) {
             <div id="cashOutTotal" style="font-size:var(--fs-2xl);font-weight:800;font-family:var(--font-mono);color:var(--accent-primary);">$0</div>
             <div id="cashOutTotalReal" style="font-size:var(--fs-md);color:var(--text-secondary);">R$ 0,00</div>
         </div>
-        <button class="btn btn-success btn-block" style="margin-top:var(--sp-md);" onclick="doCashOut('${data.gameId}','${data.playerId}')">Confirmar Saída</button>
+        <button class="btn btn-success btn-block" style="margin-top:var(--sp-md);" onclick="doCashOut('${data.gameId}','${data.playerId}',${isEdit})">${isEdit ? 'Salvar Saída' : 'Confirmar Saída'}</button>
     `;
 }
 
@@ -1694,7 +1698,7 @@ function doRebuy(gameId, playerId, gameType) {
     openGameDetail(gameId, gameType);
 }
 
-function doCashOut(gameId, playerId) {
+function doCashOut(gameId, playerId, isEdit) {
     let total = 0;
     [100, 500, 1000, 5000].forEach(d => {
         const v = parseInt(document.getElementById('co-' + d)?.value) || 0;
@@ -1707,7 +1711,22 @@ function doCashOut(gameId, playerId) {
     debouncedSave();
     closeModal();
     const profit = total - pp.buyInTotal;
-    toast(`${getPlayerName(playerId)} saiu com ${formatChips(total)} (${profit >= 0 ? '+' : ''}${formatBRL(profit)})`);
+    if (isEdit) {
+        toast(`Saída de ${getPlayerName(playerId)} atualizada: ${formatChips(total)} (${profit >= 0 ? '+' : ''}${formatBRL(profit)})`);
+    } else {
+        toast(`${getPlayerName(playerId)} saiu com ${formatChips(total)} (${profit >= 0 ? '+' : ''}${formatBRL(profit)})`);
+    }
+    openGameDetail(gameId, 'home');
+}
+
+function bringPlayerBack(gameId, playerId) {
+    const game = DB.homeGames.find(g => g.id === gameId);
+    const pp = game.players.find(p => p.id === playerId);
+    if (!pp) return;
+    pp.cashOut = null;
+    pp.active = true;
+    debouncedSave();
+    toast(`${getPlayerName(playerId)} voltou ao jogo 🔄`);
     openGameDetail(gameId, 'home');
 }
 
@@ -1970,6 +1989,12 @@ function renderGameDetail(gameId, gameType) {
         if (gameType === 'home') {
             if (pp.cashOut !== null && pp.cashOut !== undefined) {
                 html += `<span class="gp-chips ${balanceClass(profit)}">Saída: ${formatChips(pp.cashOut)} (${profit >= 0 ? '+' : ''}${formatBRL(profit)})</span>`;
+                if (isActive) {
+                    html += `<span class="gp-actions">
+                        <button class="btn btn-sm btn-secondary" onclick="event.stopPropagation();openModal('cashOut',{gameId:'${gameId}',playerId:'${pp.id}',edit:true})">✏️ Editar Saída</button>
+                        <button class="btn btn-sm btn-primary" onclick="event.stopPropagation();bringPlayerBack('${gameId}','${pp.id}')">↩️ Voltar ao Jogo</button>
+                    </span>`;
+                }
             } else if (isActive) {
                 html += `<span class="gp-actions">
                     <button class="btn btn-sm btn-success" onclick="event.stopPropagation();openModal('cashOut',{gameId:'${gameId}',playerId:'${pp.id}'})">💰 Saída</button>
