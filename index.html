@@ -1173,14 +1173,22 @@ function calculatePlayerStats(playerId) {
     return { gamesPlayed, wins, totalProfit };
 }
 
-// Chips still in play: buy-ins (incl. rebuys) of players who haven't left the table yet.
+// Chips still in play: everything bought in, minus what has already left with departed players.
+// For home games this is pot − saídas, so the figure equals exactly what the remaining
+// players must cash out with. For tournaments there is no cash-out, so eliminated players'
+// buy-ins simply stay in the pot.
 function calcChipsOnTable(game, gameType) {
-    return (game.players || []).reduce((s, p) => {
-        const stillIn = gameType === 'home'
-            ? (p.cashOut === null || p.cashOut === undefined)
-            : !p.eliminated;
-        return stillIn ? s + (p.buyInTotal || 0) : s;
-    }, 0);
+    const players = game.players || [];
+    const pot = players.reduce((s, p) => s + (p.buyInTotal || 0), 0);
+    if (gameType !== 'home') {
+        return players.reduce((s, p) => p.eliminated ? s : s + (p.buyInTotal || 0), 0);
+    }
+    const cashedOut = players.reduce((s, p) => s + (hasCashedOut(p) ? p.cashOut : 0), 0);
+    return pot - cashedOut;
+}
+
+function hasCashedOut(p) {
+    return p.cashOut !== null && p.cashOut !== undefined;
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -1455,8 +1463,12 @@ function modalRebuy(data) {
 function modalCashOut(data) {
     const game = DB.homeGames.find(g => g.id === data.gameId);
     const pp = game.players.find(p => p.id === data.playerId);
-    const isEdit = data.edit && pp.cashOut !== null && pp.cashOut !== undefined;
-    const prefill = isEdit ? calcChipBreakdown(pp.cashOut) : {};
+    const isEdit = data.edit && hasCashedOut(pp);
+    const available = calcChipsOnTable(game, 'home') + (isEdit ? pp.cashOut : 0);
+    const isLast = game.players.filter(p => p.id !== data.playerId && !hasCashedOut(p)).length === 0;
+    // The last player must take exactly what's left, so seed the breakdown for them.
+    const prefill = isEdit ? calcChipBreakdown(pp.cashOut)
+        : isLast ? calcChipBreakdown(available) : {};
     return `
         <div class="modal-header">
             <h2 class="modal-title">${isEdit ? 'Editar Saída' : 'Saída'} — ${getPlayerName(data.playerId)}</h2>
@@ -1466,7 +1478,9 @@ function modalCashOut(data) {
             Buy-in total: ${formatChips(pp.buyInTotal)} (${formatBRL(pp.buyInTotal)})
         </p>
         <p style="font-size:var(--fs-sm);color:var(--text-muted);margin-bottom:var(--sp-md);">
-            Insira as fichas que o jogador está levando:
+            ${isLast
+                ? `Último jogador na mesa — a saída deve ser exatamente <strong style="color:var(--accent-primary);">${formatChips(available)}</strong> (${formatBRL(available)}).`
+                : `Insira as fichas que o jogador está levando (na mesa: <strong>${formatChips(available)}</strong>):`}
         </p>
         <div style="display:flex;flex-direction:column;gap:var(--sp-sm);">
             ${Object.entries(CONFIG.CHIP_LABELS).map(([d, label]) => `
@@ -1480,12 +1494,14 @@ function modalCashOut(data) {
                 </div>
             `).join('')}
         </div>
-        <div style="margin-top:var(--sp-md);padding:var(--sp-md);background:var(--bg-tertiary);border-radius:var(--radius-md);text-align:center;">
+        <div id="cashOutLimits" data-available="${available}" data-islast="${isLast ? 1 : 0}"
+             style="margin-top:var(--sp-md);padding:var(--sp-md);background:var(--bg-tertiary);border-radius:var(--radius-md);text-align:center;">
             <div style="font-size:var(--fs-xs);color:var(--text-muted);text-transform:uppercase;">Total de Saída</div>
             <div id="cashOutTotal" style="font-size:var(--fs-2xl);font-weight:800;font-family:var(--font-mono);color:var(--accent-primary);">$0</div>
             <div id="cashOutTotalReal" style="font-size:var(--fs-md);color:var(--text-secondary);">R$ 0,00</div>
+            <div id="cashOutWarn" style="font-size:var(--fs-sm);color:var(--accent-danger);margin-top:var(--sp-xs);"></div>
         </div>
-        <button class="btn btn-success btn-block" style="margin-top:var(--sp-md);" onclick="doCashOut('${data.gameId}','${data.playerId}',${isEdit})">${isEdit ? 'Salvar Saída' : 'Confirmar Saída'}</button>
+        <button id="cashOutConfirm" class="btn btn-success btn-block" style="margin-top:var(--sp-md);" onclick="doCashOut('${data.gameId}','${data.playerId}',${isEdit})">${isEdit ? 'Salvar Saída' : 'Confirmar Saída'}</button>
     `;
 }
 
@@ -1683,6 +1699,26 @@ function updateCashOutTotal() {
     const elR = document.getElementById('cashOutTotalReal');
     if (el) el.textContent = formatChips(total);
     if (elR) elR.textContent = formatBRL(total);
+
+    const limits = document.getElementById('cashOutLimits');
+    const warn = document.getElementById('cashOutWarn');
+    const btn = document.getElementById('cashOutConfirm');
+    if (!limits || !warn || !btn) return;
+
+    const available = parseInt(limits.dataset.available) || 0;
+    const isLast = limits.dataset.islast === '1';
+    const diff = total - available;
+
+    let msg = '';
+    if (total > available) {
+        msg = `Excede em ${formatChips(diff)} o que resta na mesa (${formatChips(available)}).`;
+    } else if (isLast && total < available) {
+        msg = `Faltam ${formatChips(-diff)} para fechar a conta (${formatChips(available)}).`;
+    }
+    warn.textContent = msg;
+    btn.disabled = !!msg;
+    btn.style.opacity = msg ? '0.5' : '';
+    if (el) el.style.color = msg ? 'var(--accent-danger)' : 'var(--accent-primary)';
 }
 
 function updateBatchPreview() {
@@ -1910,7 +1946,24 @@ function doCashOut(gameId, playerId, isEdit) {
         total += v * d;
     });
     const game = DB.homeGames.find(g => g.id === gameId);
+    if (!game) return;
     const pp = game.players.find(p => p.id === playerId);
+    if (!pp) return;
+
+    // Chips available to this player = what's on the table, ignoring their own previous
+    // saída when editing (that value is being replaced).
+    const available = calcChipsOnTable(game, 'home') + (hasCashedOut(pp) ? pp.cashOut : 0);
+    const othersStillIn = game.players.filter(p => p.id !== playerId && !hasCashedOut(p)).length;
+
+    if (total > available) {
+        toast(`Saída de ${formatChips(total)} excede as ${formatChips(available)} que restam na mesa.`, 'error');
+        return;
+    }
+    if (othersStillIn === 0 && total !== available) {
+        toast(`Último jogador na mesa: a saída deve ser exatamente ${formatChips(available)} para a conta fechar.`, 'error');
+        return;
+    }
+
     pp.cashOut = total;
     pp.active = false;
     debouncedSave();
